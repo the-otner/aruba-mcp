@@ -793,7 +793,7 @@ async def get_all_wlans(group_name: str) -> str:
     Get all WLANs in a group.
     
     Args:
-        group_name: Configuration group name
+        group_name: Configuration group name (call get_groups first to retrieve valid names)
         
     Returns:
         JSON string containing all WLANs
@@ -822,7 +822,7 @@ async def create_wlan(
     except json.JSONDecodeError:
         return json.dumps({"error": True, "message": "Invalid JSON format for WLAN config"})
     
-    result = await _post(f"/configuration/v1/wlan/{group_name}", config_dict)
+    result = await _post(f"/configuration/v2/wlan/{group_name}", config_dict)
     return json.dumps(result)
 
 
@@ -867,7 +867,7 @@ async def delete_wlan(
     Returns:
         JSON string containing deletion result
     """
-    result = await _delete(f"/configuration/v2/wlan/{group_name}/{wlan_name}")
+    result = await _delete(f"/configuration/v1/wlan/{group_name}/{wlan_name}")
     return json.dumps(result)
 
 
