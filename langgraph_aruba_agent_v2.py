@@ -520,14 +520,16 @@ class MCPToolManager:
                 pass
         print(f"{Colors.OKBLUE}Disconnected from all sources{Colors.ENDC}")
 
-
+from langchain_openai import ChatOpenAI
 class ArubaLangGraphAgent:
     def __init__(self, tool_manager: MCPToolManager, semantic_filter: SemanticToolFilter):
         self.tool_manager = tool_manager
         self.semantic_filter = semantic_filter
 
         print(f"\n{Colors.OKBLUE}Initializing Ollama LLM: {OLLAMA_MODEL}...{Colors.ENDC}")
-        self.llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_URL, temperature=0)
+        # self.llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_URL, temperature=0)
+        self.llm = ChatOpenAI(model=OLLAMA_MODEL,base_url=OLLAMA_URL,api_key="dummy",temperature=0)
+
         self._build_graph()
         print(f"{Colors.OKGREEN}LangGraph agent v2 initialized{Colors.ENDC}")
 
