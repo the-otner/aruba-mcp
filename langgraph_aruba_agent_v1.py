@@ -185,6 +185,7 @@ class Colors:
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
     filtered_tool_names: Annotated[list[str], "Names of tools filtered for this query"]
+    tool_failure_counts: Annotated[dict, "Tracks consecutive failure counts per tool to break retry loops"]
 
 
 class MCPToolManager:
@@ -237,6 +238,10 @@ class MCPToolManager:
             method = endpoint["method"]
             path_template = endpoint["path"]
             default_params = endpoint.get("params", {})
+
+            # Unwrap if the LLM mistakenly nested all args inside a 'kwargs' key
+            if len(kwargs) == 1 and "kwargs" in kwargs and isinstance(kwargs.get("kwargs"), dict):
+                kwargs = kwargs["kwargs"]
 
             # Separate path params from query/body params
             clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -401,6 +406,10 @@ class ArubaLangGraphAgent:
             "client": ["get_visualrf_floor_clients", "get_wids_client_attacks"],
             "wireless client": ["get_visualrf_floor_clients"],
             "wired client": ["get_visualrf_floor_clients"],
+            "macaddr": ["get_client_details"],
+            "mac address": ["get_client_details", "get_mac_address_table"],
+            "verify": ["get_client_details"],
+            "legitimate": ["get_client_details", "get_wids_client_attacks"],
             "gateway": ["get_device_inventory"],
             "inventory": ["get_device_inventory"],
             "device": ["get_device_inventory"],
@@ -486,9 +495,11 @@ CRITICAL RULES:
 8. For inventory queries, use get_device_inventory with sku_type parameter: IAP for APs, ArubaSwitch for switches.
 9. Present data in organized tables or bullet points with key details.
 10. If asked about topology/connections and topology tools fail, use get_device_inventory to show all devices instead.
+11. ALWAYS pass parameters directly (e.g., macaddr="3C:0A:F3:9B:7E:51"), NEVER nest them inside a 'kwargs' dict.
 
 TOOL PARAMETER TIPS:
 - get_device_inventory: use sku_type="IAP" for APs, sku_type="ArubaSwitch" for switches, omit for all devices
+- get_client_details: pass the MAC address directly as macaddr="XX:XX:XX:XX:XX:XX"
 - get_sites: no required params, returns all sites
 - get_all_wlans: use group parameter if filtering by group
 - get_firmware_versions: use device_type parameter
@@ -506,12 +517,14 @@ WORKING API ENDPOINTS:
 - get_rogue_aps, get_suspect_aps, get_interfering_aps -> security
 - get_firmware_versions -> available firmware
 - get_subscription_keys -> licenses
+- get_client_details(macaddr="XX:XX:XX:XX:XX:XX") -> detailed info for a specific client by MAC
 
 MULTI-STEP EXAMPLES:
 - "topology/architecture" -> call get_device_inventory AND get_sites in parallel, then describe network layout
 - "switches needing upgrades" -> call get_device_inventory(sku_type=ArubaSwitch) AND get_firmware_versions in parallel, then compare versions
 - "network summary" -> call get_sites, get_device_inventory, get_all_wlans, get_rogue_aps in parallel
 - "slow WiFi troubleshoot" -> call get_device_inventory(sku_type=IAP), get_interfering_aps, get_rogue_aps in parallel
+- "verify client 3C:0A:F3:9B:7E:51" -> call get_client_details(macaddr="3C:0A:F3:9B:7E:51")
 
 RESPONSE FORMAT:
 - Always respond with actual data, never an empty response
@@ -553,6 +566,7 @@ RESPONSE FORMAT:
         if not hasattr(last, "tool_calls") or not last.tool_calls:
             return state
 
+        failure_counts = dict(state.get("tool_failure_counts") or {})
         msgs = []
         for tc in last.tool_calls:
             name, args = tc["name"], tc.get("args", {})
@@ -562,27 +576,48 @@ RESPONSE FORMAT:
 
             if name in self.tool_manager.langchain_tools:
                 try:
-                    result = await self.tool_manager.langchain_tools[name].ainvoke(args)
-                    result_str = str(result)
-                    if len(result_str) > 500:
+                    invocation_result = await self.tool_manager.langchain_tools[name].ainvoke(args)
+                    result_str = str(invocation_result)
+                    # Track failures to break infinite retry loops
+                    try:
+                        result_data = json.loads(result_str)
+                        if isinstance(result_data, dict) and result_data.get("error"):
+                            failure_counts[name] = failure_counts.get(name, 0) + 1
+                        else:
+                            failure_counts[name] = 0  # Reset on success
+                    except Exception:
+                        failure_counts[name] = 0  # Reset on non-JSON success
+
+                    if failure_counts.get(name, 0) >= 3:
+                        result_str = json.dumps({
+                            "error": True,
+                            "detail": f"Tool '{name}' has failed {failure_counts[name]} times in a row. "
+                                      "STOP calling this tool and try a different approach or report what you know."
+                        })
+                        print(f"{Colors.FAIL}⛔ Blocking '{name}' after repeated failures{Colors.ENDC}\n")
+                    elif len(result_str) > 500:
                         print(f"{Colors.OKGREEN}✓ Done ({len(result_str)} chars){Colors.ENDC}")
                         print(f"   Preview: {result_str[:300]}...\n")
                     else:
                         print(f"{Colors.OKGREEN}✓ Done ({len(result_str)} chars){Colors.ENDC}")
                         print(f"   Result: {result_str}\n")
                 except Exception as e:
-                    result = json.dumps({"error": True, "detail": str(e)})
+                    result_str = json.dumps({"error": True, "detail": str(e)})
+                    failure_counts[name] = failure_counts.get(name, 0) + 1
                     print(f"{Colors.FAIL}✗ Failed: {e}{Colors.ENDC}\n")
-                msgs.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+                msgs.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
 
-        return {**state, "messages": list(state["messages"]) + msgs}
+        return {**state, "messages": list(state["messages"]) + msgs, "tool_failure_counts": failure_counts}
 
     def _should_continue(self, state: AgentState):
         last = state["messages"][-1]
         return "continue" if hasattr(last, "tool_calls") and last.tool_calls else "end"
 
     async def run(self, query: str):
-        result = await self.graph.ainvoke({"messages": [HumanMessage(content=query)], "filtered_tool_names": []}, {"recursion_limit": 15})
+        result = await self.graph.ainvoke(
+            {"messages": [HumanMessage(content=query)], "filtered_tool_names": [], "tool_failure_counts": {}},
+            {"recursion_limit": 25}
+        )
         final = result["messages"][-1]
         return final.content if hasattr(final, "content") else str(final)
 
