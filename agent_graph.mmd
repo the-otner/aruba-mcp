@@ -1,0 +1,19 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	filter_tools(filter_tools)
+	agent(agent)
+	execute_tools(execute_tools)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> filter_tools;
+	agent -. &nbsp;end&nbsp; .-> __end__;
+	agent -. &nbsp;continue&nbsp; .-> execute_tools;
+	execute_tools --> agent;
+	filter_tools --> agent;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
