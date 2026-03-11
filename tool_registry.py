@@ -515,8 +515,8 @@ TOOL_REGISTRY = {
     },
     "get_client_details": {
         "category": "clients",
-        "description": "Get detailed info for a specific client by MAC address.",
-        "keywords": ["client", "details", "MAC", "specific", "info", "history", "signal"]
+        "description": "Get detailed info for a specific client by MAC address. Pass the MAC address directly as the \"macaddr\" parameter (e.g., macaddr=\"3C:0A:F3:9B:7E:51\"). Returns connection history, signal quality, throughput, OS type, and VLAN.",
+        "keywords": ["client", "details", "MAC", "macaddr", "specific", "info", "history", "signal", "verify", "legitimate", "lookup"]
     },
     "get_client_count": {
         "category": "clients",

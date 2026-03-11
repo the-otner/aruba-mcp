@@ -215,6 +215,7 @@ class Colors:
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], "The messages in the conversation"]
     filtered_tool_names: Annotated[list[str], "Names of tools filtered for this query"]
+    tool_failure_counts: Annotated[dict, "Tracks consecutive failure counts per tool to break retry loops"]
 
 
 class MCPToolManager:
@@ -338,6 +339,10 @@ class MCPToolManager:
             method = endpoint["method"]
             path_template = endpoint["path"]
             default_params = endpoint.get("params", {})
+
+            # Unwrap if the LLM mistakenly nested all args inside a 'kwargs' key
+            if len(kwargs) == 1 and "kwargs" in kwargs and isinstance(kwargs.get("kwargs"), dict):
+                kwargs = kwargs["kwargs"]
 
             clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
             path_params = {}
@@ -514,6 +519,10 @@ class ArubaLangGraphAgent:
             "site": ["get_sites"],
             "group": ["get_groups"],
             "client": ["get_clients", "get_client_count"],
+            "macaddr": ["get_client_details"],
+            "mac address": ["get_client_details", "get_mac_address_table"],
+            "verify": ["get_client_details", "get_clients"],
+            "legitimate": ["get_client_details", "get_wids_client_attacks"],
             "wireless client": ["get_wireless_clients", "get_client_count"],
             "wired client": ["get_wired_clients"],
             "how many client": ["get_client_count"],
@@ -656,6 +665,7 @@ class ArubaLangGraphAgent:
 PHASE 1 - Aruba Central API (cloud monitoring):
 - get_device_inventory, get_aps, get_switches, get_gateways — device status
 - get_clients, get_client_count — connected users
+- get_client_details — get details for a specific client; pass the MAC address as macaddr="XX:XX:XX:XX:XX:XX"
 - get_alerts — active alerts
 - get_sites, get_groups, get_all_wlans — configuration
 - get_rogue_aps, get_wids_events — security
@@ -680,6 +690,7 @@ CRITICAL RULES:
 6. Present data in organized tables or bullet points.
 7. NEVER say "Would you like me to try?" — just try it automatically.
 8. For SSH tools, the default device_type is aruba_oscx. User can override.
+9. ALWAYS pass parameters directly (e.g., macaddr="3C:0A:F3:9B:7E:51"), NEVER nest them inside a 'kwargs' dict.
 
 KNOWN BROKEN TOOLS (DO NOT USE):
 - get_topology_devices, get_topology_edges, get_topology_uplinks, get_topology_tunnels, get_topology_site
@@ -722,6 +733,7 @@ MULTI-STEP EXAMPLES:
         if not hasattr(last, "tool_calls") or not last.tool_calls:
             return state
 
+        failure_counts = dict(state.get("tool_failure_counts") or {})
         msgs = []
         for tc in last.tool_calls:
             name, args = tc["name"], tc.get("args", {})
@@ -732,20 +744,38 @@ MULTI-STEP EXAMPLES:
 
             if name in self.tool_manager.langchain_tools:
                 try:
-                    result = await self.tool_manager.langchain_tools[name].ainvoke(args)
-                    result_str = str(result)
-                    if len(result_str) > 500:
+                    invocation_result = await self.tool_manager.langchain_tools[name].ainvoke(args)
+                    result_str = str(invocation_result)
+                    # Check if the result indicates an error
+                    try:
+                        result_data = json.loads(result_str)
+                        if isinstance(result_data, dict) and result_data.get("error"):
+                            failure_counts[name] = failure_counts.get(name, 0) + 1
+                        else:
+                            failure_counts[name] = 0  # Reset on success
+                    except Exception:
+                        failure_counts[name] = 0  # Reset on non-JSON success
+
+                    if failure_counts.get(name, 0) >= 3:
+                        result_str = json.dumps({
+                            "error": True,
+                            "detail": f"Tool '{name}' has failed {failure_counts[name]} times in a row. "
+                                      "STOP calling this tool and try a different approach or report what you know."
+                        })
+                        print(f"{Colors.FAIL}⛔ Blocking '{name}' after repeated failures{Colors.ENDC}\n")
+                    elif len(result_str) > 500:
                         print(f"{Colors.OKGREEN}✓ Done ({len(result_str)} chars){Colors.ENDC}")
                         print(f"   Preview: {result_str[:300]}...\n")
                     else:
                         print(f"{Colors.OKGREEN}✓ Done ({len(result_str)} chars){Colors.ENDC}")
                         print(f"   Result: {result_str}\n")
                 except Exception as e:
-                    result = json.dumps({"error": True, "detail": str(e)})
+                    result_str = json.dumps({"error": True, "detail": str(e)})
+                    failure_counts[name] = failure_counts.get(name, 0) + 1
                     print(f"{Colors.FAIL}✗ Failed: {e}{Colors.ENDC}\n")
-                msgs.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+                msgs.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
 
-        return {**state, "messages": list(state["messages"]) + msgs}
+        return {**state, "messages": list(state["messages"]) + msgs, "tool_failure_counts": failure_counts}
 
     def _should_continue(self, state: AgentState):
         last = state["messages"][-1]
@@ -753,8 +783,8 @@ MULTI-STEP EXAMPLES:
 
     async def run(self, query: str):
         result = await self.graph.ainvoke(
-            {"messages": [HumanMessage(content=query)], "filtered_tool_names": []},
-            {"recursion_limit": 15}
+            {"messages": [HumanMessage(content=query)], "filtered_tool_names": [], "tool_failure_counts": {}},
+            {"recursion_limit": 25}
         )
         final = result["messages"][-1]
         return final.content if hasattr(final, "content") else str(final)
