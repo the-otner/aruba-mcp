@@ -783,7 +783,7 @@ async def get_wlan(
     Returns:
         JSON string containing WLAN details
     """
-    result = await _get(f"/configuration/full_wlan/{group_name}/{wlan_name}")
+    result = await _get(f"/configuration/v2/wlan/{group_name}/{wlan_name}")
     return json.dumps(result)
 
 
@@ -798,7 +798,7 @@ async def get_all_wlans(group_name: str) -> str:
     Returns:
         JSON string containing all WLANs
     """
-    result = await _get(f"/configuration/v1/wlan/{group_name}")
+    result = await _get(f"/configuration/v2/wlan/{group_name}")
     return json.dumps(result)
 
 
@@ -822,7 +822,7 @@ async def create_wlan(
     except json.JSONDecodeError:
         return json.dumps({"error": True, "message": "Invalid JSON format for WLAN config"})
     
-    result = await _post(f"/configuration/v1/wlan/{group_name}", config_dict)
+    result = await _post(f"/configuration/v2/wlan/{group_name}", config_dict)
     return json.dumps(result)
 
 

@@ -667,7 +667,9 @@ PHASE 1 - Aruba Central API (cloud monitoring):
 - get_clients, get_client_count — connected users
 - get_client_details — get details for a specific client; pass the MAC address as macaddr="XX:XX:XX:XX:XX:XX"
 - get_alerts — active alerts
-- get_sites, get_groups, get_all_wlans — configuration
+- get_sites — returns all sites (no required params)
+- get_groups — returns all groups (no required params)
+- get_all_wlans(group_name) — REQUIRES group_name; returns WLANs for ONE group
 - get_rogue_aps, get_wids_events — security
 
 PHASE 2 - SSH/CLI (direct device access):
@@ -690,13 +692,21 @@ CRITICAL RULES:
 6. Present data in organized tables or bullet points.
 7. NEVER say "Would you like me to try?" — just try it automatically.
 8. For SSH tools, the default device_type is aruba_oscx. User can override.
-9. ALWAYS pass parameters directly (e.g., macaddr="3C:0A:F3:9B:7E:51"), NEVER nest them inside a 'kwargs' dict.
+9. ALWAYS pass parameters directly (e.g., group_name="Airowire-IAP"), NEVER nest them inside a 'kwargs' dict.
 
 KNOWN BROKEN TOOLS (DO NOT USE):
 - get_topology_devices, get_topology_edges, get_topology_uplinks, get_topology_tunnels, get_topology_site
 
+MULTI-STEP WLAN WORKFLOW (use this exact pattern):
+- Step 1: call get_groups (no params needed) to get all group names
+- Step 2: from the groups result, call get_all_wlans(group_name=<name>) for EACH group one by one
+- Step 3: if a group returns 404, it has no WLANs (switch/non-wireless group) — skip it, move to next group
+- Step 4: after iterating all groups, summarize all WLANs found
+
 MULTI-STEP EXAMPLES:
-- "network summary" → call get_device_inventory, get_sites, get_client_count, get_alerts in parallel
+- "WLAN/wireless config" → first call get_groups, then call get_all_wlans for each group in sequence
+- "site, group, WLAN config" → call get_sites AND get_groups in parallel; then call get_all_wlans for each group one by one
+- "network summary" → call get_device_inventory, get_sites, get_client_count, get_alerts in parallel; then get WLANs per group
 - "OSPF on 10.1.1.1" → call get_ospf_neighbors(device_ip="10.1.1.1")
 - "security audit on 10.1.1.5" → call audit_security_posture(device_ip="10.1.1.5")
 - "compare configs on switch" → call compare_configs(device_ip="x.x.x.x")
@@ -742,6 +752,14 @@ MULTI-STEP EXAMPLES:
             if args:
                 print(f"   Args: {json.dumps(args, indent=2)}")
 
+            # Track failures per (tool_name + args) so that different arguments
+            # (e.g. different group_name values) are counted independently.
+            # This prevents blocking get_all_wlans for group B just because group A returned 404.
+            try:
+                failure_key = f"{name}::{json.dumps(args, sort_keys=True)}"
+            except Exception:
+                failure_key = f"{name}::{str(args)}"
+
             if name in self.tool_manager.langchain_tools:
                 try:
                     invocation_result = await self.tool_manager.langchain_tools[name].ainvoke(args)
@@ -750,19 +768,19 @@ MULTI-STEP EXAMPLES:
                     try:
                         result_data = json.loads(result_str)
                         if isinstance(result_data, dict) and result_data.get("error"):
-                            failure_counts[name] = failure_counts.get(name, 0) + 1
+                            failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
                         else:
-                            failure_counts[name] = 0  # Reset on success
+                            failure_counts[failure_key] = 0  # Reset on success
                     except Exception:
-                        failure_counts[name] = 0  # Reset on non-JSON success
+                        failure_counts[failure_key] = 0  # Reset on non-JSON success
 
-                    if failure_counts.get(name, 0) >= 3:
+                    if failure_counts.get(failure_key, 0) >= 3:
                         result_str = json.dumps({
                             "error": True,
-                            "detail": f"Tool '{name}' has failed {failure_counts[name]} times in a row. "
-                                      "STOP calling this tool and try a different approach or report what you know."
+                            "detail": f"Tool '{name}' has failed {failure_counts[failure_key]} times with the same arguments. "
+                                      "STOP calling this tool with these arguments and try different parameters or a different approach."
                         })
-                        print(f"{Colors.FAIL}⛔ Blocking '{name}' after repeated failures{Colors.ENDC}\n")
+                        print(f"{Colors.FAIL}⛔ Blocking '{name}' after repeated failures with same args{Colors.ENDC}\n")
                     elif len(result_str) > 500:
                         print(f"{Colors.OKGREEN}✓ Done ({len(result_str)} chars){Colors.ENDC}")
                         print(f"   Preview: {result_str[:300]}...\n")
@@ -771,7 +789,7 @@ MULTI-STEP EXAMPLES:
                         print(f"   Result: {result_str}\n")
                 except Exception as e:
                     result_str = json.dumps({"error": True, "detail": str(e)})
-                    failure_counts[name] = failure_counts.get(name, 0) + 1
+                    failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
                     print(f"{Colors.FAIL}✗ Failed: {e}{Colors.ENDC}\n")
                 msgs.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
 
@@ -784,7 +802,7 @@ MULTI-STEP EXAMPLES:
     async def run(self, query: str):
         result = await self.graph.ainvoke(
             {"messages": [HumanMessage(content=query)], "filtered_tool_names": [], "tool_failure_counts": {}},
-            {"recursion_limit": 25}
+            {"recursion_limit": 50}
         )
         final = result["messages"][-1]
         return final.content if hasattr(final, "content") else str(final)

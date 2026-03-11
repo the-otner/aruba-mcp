@@ -495,13 +495,15 @@ CRITICAL RULES:
 8. For inventory queries, use get_device_inventory with sku_type parameter: IAP for APs, ArubaSwitch for switches.
 9. Present data in organized tables or bullet points with key details.
 10. If asked about topology/connections and topology tools fail, use get_device_inventory to show all devices instead.
-11. ALWAYS pass parameters directly (e.g., macaddr="3C:0A:F3:9B:7E:51"), NEVER nest them inside a 'kwargs' dict.
+11. ALWAYS pass parameters directly (e.g., group_name="Airowire-IAP"), NEVER nest them inside a 'kwargs' dict.
 
 TOOL PARAMETER TIPS:
 - get_device_inventory: use sku_type="IAP" for APs, sku_type="ArubaSwitch" for switches, omit for all devices
 - get_client_details: pass the MAC address directly as macaddr="XX:XX:XX:XX:XX:XX"
 - get_sites: no required params, returns all sites
-- get_all_wlans: use group parameter if filtering by group
+- get_groups: no required params, returns all groups
+- get_all_wlans: REQUIRES group_name (mandatory). Call get_groups first to get the list of groups, then call get_all_wlans for EACH group one at a time. Groups that are switch-only (e.g. names containing "SW", "Switch", "Core") will return 404 - that is normal, just skip them and move to the next group.
+- get_wlan: REQUIRES both group_name AND wlan_name parameters
 - get_firmware_versions: use device_type parameter
 
 KNOWN BROKEN TOOLS (DO NOT USE THESE - they return 404):
@@ -512,17 +514,24 @@ KNOWN BROKEN TOOLS (DO NOT USE THESE - they return 404):
 WORKING API ENDPOINTS:
 - get_device_inventory -> returns all devices (APs, switches, gateways)
 - get_sites -> returns all sites
-- get_all_wlans -> returns WLANs
-- get_groups -> returns groups
+- get_groups -> returns all groups
+- get_all_wlans(group_name) -> returns WLANs for one group (REQUIRED: group_name)
 - get_rogue_aps, get_suspect_aps, get_interfering_aps -> security
 - get_firmware_versions -> available firmware
 - get_subscription_keys -> licenses
 - get_client_details(macaddr="XX:XX:XX:XX:XX:XX") -> detailed info for a specific client by MAC
 
+MULTI-STEP WLAN WORKFLOW (use this exact pattern):
+- Step 1: call get_groups (no params needed) to get all group names
+- Step 2: from the groups result, call get_all_wlans(group_name=<name>) for EACH group one by one
+- Step 3: if a group returns 404, it has no WLANs (it's a switch/non-wireless group) — skip it, move to the next group
+- Step 4: after iterating all groups, summarize all WLANs found
+
 MULTI-STEP EXAMPLES:
+- "WLAN/wireless config" -> first call get_groups, then call get_all_wlans for each group in sequence
 - "topology/architecture" -> call get_device_inventory AND get_sites in parallel, then describe network layout
 - "switches needing upgrades" -> call get_device_inventory(sku_type=ArubaSwitch) AND get_firmware_versions in parallel, then compare versions
-- "network summary" -> call get_sites, get_device_inventory, get_all_wlans, get_rogue_aps in parallel
+- "network summary" -> call get_sites, get_device_inventory, get_groups in parallel; then get_all_wlans for each group
 - "slow WiFi troubleshoot" -> call get_device_inventory(sku_type=IAP), get_interfering_aps, get_rogue_aps in parallel
 - "verify client 3C:0A:F3:9B:7E:51" -> call get_client_details(macaddr="3C:0A:F3:9B:7E:51")
 
@@ -574,6 +583,14 @@ RESPONSE FORMAT:
             if args:
                 print(f"   Args: {json.dumps(args, indent=2)}")
 
+            # Track failures per (tool_name + args) so that different arguments
+            # (e.g. different group_name values) are counted independently.
+            # This prevents blocking get_all_wlans for group B just because group A returned 404.
+            try:
+                failure_key = f"{name}::{json.dumps(args, sort_keys=True)}"
+            except Exception:
+                failure_key = f"{name}::{str(args)}"
+
             if name in self.tool_manager.langchain_tools:
                 try:
                     invocation_result = await self.tool_manager.langchain_tools[name].ainvoke(args)
@@ -582,19 +599,19 @@ RESPONSE FORMAT:
                     try:
                         result_data = json.loads(result_str)
                         if isinstance(result_data, dict) and result_data.get("error"):
-                            failure_counts[name] = failure_counts.get(name, 0) + 1
+                            failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
                         else:
-                            failure_counts[name] = 0  # Reset on success
+                            failure_counts[failure_key] = 0  # Reset on success
                     except Exception:
-                        failure_counts[name] = 0  # Reset on non-JSON success
+                        failure_counts[failure_key] = 0  # Reset on non-JSON success
 
-                    if failure_counts.get(name, 0) >= 3:
+                    if failure_counts.get(failure_key, 0) >= 3:
                         result_str = json.dumps({
                             "error": True,
-                            "detail": f"Tool '{name}' has failed {failure_counts[name]} times in a row. "
-                                      "STOP calling this tool and try a different approach or report what you know."
+                            "detail": f"Tool '{name}' has failed {failure_counts[failure_key]} times with the same arguments. "
+                                      "STOP calling this tool with these arguments and try different parameters or a different approach."
                         })
-                        print(f"{Colors.FAIL}⛔ Blocking '{name}' after repeated failures{Colors.ENDC}\n")
+                        print(f"{Colors.FAIL}⛔ Blocking '{name}' after repeated failures with same args{Colors.ENDC}\n")
                     elif len(result_str) > 500:
                         print(f"{Colors.OKGREEN}✓ Done ({len(result_str)} chars){Colors.ENDC}")
                         print(f"   Preview: {result_str[:300]}...\n")
@@ -603,7 +620,7 @@ RESPONSE FORMAT:
                         print(f"   Result: {result_str}\n")
                 except Exception as e:
                     result_str = json.dumps({"error": True, "detail": str(e)})
-                    failure_counts[name] = failure_counts.get(name, 0) + 1
+                    failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
                     print(f"{Colors.FAIL}✗ Failed: {e}{Colors.ENDC}\n")
                 msgs.append(ToolMessage(content=result_str, tool_call_id=tc["id"]))
 
@@ -616,7 +633,7 @@ RESPONSE FORMAT:
     async def run(self, query: str):
         result = await self.graph.ainvoke(
             {"messages": [HumanMessage(content=query)], "filtered_tool_names": [], "tool_failure_counts": {}},
-            {"recursion_limit": 25}
+            {"recursion_limit": 50}
         )
         final = result["messages"][-1]
         return final.content if hasattr(final, "content") else str(final)
