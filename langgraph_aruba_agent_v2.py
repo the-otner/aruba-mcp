@@ -36,9 +36,17 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 TOP_K_TOOLS = int(os.getenv("TOP_K_TOOLS", "10"))
 
+# Maximum times the same (tool, args) pair may fail before being suppressed
+MAX_TOOL_FAILURES = 3
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 1: Aruba Central REST API endpoint mapping
+# "params"      = default query parameters (merged with caller-supplied values)
+# "param_hints" = actionable guidance shown when a required path param is missing
+# NOTE: get_wlan intentionally uses the unversioned /configuration/full_wlan/
+#       path — this is the canonical GET endpoint per the pycentral SDK
+#       (ConfigurationUrl.WLAN["GET"]) and differs from the v1/v2 write paths.
 # ══════════════════════════════════════════════════════════════════════════════
 
 API_ENDPOINTS = {
@@ -47,45 +55,69 @@ API_ENDPOINTS = {
 
     # Groups
     "get_groups": {"method": "GET", "path": "/configuration/v2/groups", "params": {"offset": 0, "limit": 20}},
-    "get_group_template_info": {"method": "GET", "path": "/configuration/v1/groups/template_info"},
+    "get_group_template_info": {"method": "GET", "path": "/configuration/v2/groups/template_info"},
     "create_group": {"method": "POST", "path": "/configuration/v2/groups"},
     "clone_group": {"method": "POST", "path": "/configuration/v2/groups/clone"},
-    "delete_group": {"method": "DELETE", "path": "/configuration/v2/groups/{group_name}"},
+    "delete_group": {"method": "DELETE", "path": "/configuration/v1/groups/{group_name}",
+                     "param_hints": {"group_name": "Call get_groups to retrieve valid group names."}},
 
     # Devices Config
-    "get_device_group": {"method": "GET", "path": "/configuration/v1/devices/{serial}/group"},
-    "get_device_configuration": {"method": "GET", "path": "/configuration/v1/devices/{serial}/configuration"},
-    "get_device_config_details": {"method": "GET", "path": "/configuration/v1/devices/{serial}/config_details"},
-    "get_device_templates": {"method": "GET", "path": "/configuration/v1/devices/{serial}/templates"},
-    "get_group_device_templates": {"method": "GET", "path": "/configuration/v1/groups/{group_name}/templates"},
-    "set_switch_ssh_credentials": {"method": "POST", "path": "/configuration/v1/devices/{serial}/ssh_credentials"},
+    "get_device_group": {"method": "GET", "path": "/configuration/v1/devices/{serial}/group",
+                         "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "get_device_configuration": {"method": "GET", "path": "/configuration/v1/devices/{serial}/configuration",
+                                  "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "get_device_config_details": {"method": "GET", "path": "/configuration/v1/devices/{serial}/config_details",
+                                   "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "get_device_templates": {"method": "GET", "path": "/configuration/v1/devices/{serial}/templates",
+                              "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "get_group_device_templates": {"method": "GET", "path": "/configuration/v1/groups/{group_name}/templates",
+                                    "param_hints": {"group_name": "Call get_groups to retrieve valid group names."}},
+    "set_switch_ssh_credentials": {"method": "POST", "path": "/configuration/v1/devices/{serial}/ssh_credentials",
+                                    "param_hints": {"serial": "Call get_switches to retrieve switch serial numbers."}},
     "move_devices": {"method": "POST", "path": "/configuration/v1/devices/move"},
 
     # Templates
-    "get_templates": {"method": "GET", "path": "/configuration/v1/groups/{group_name}/templates"},
-    "get_template_text": {"method": "GET", "path": "/configuration/v1/groups/{group_name}/templates/{template_name}"},
-    "delete_template": {"method": "DELETE", "path": "/configuration/v1/groups/{group_name}/templates/{template_name}"},
+    "get_templates": {"method": "GET", "path": "/configuration/v1/groups/{group_name}/templates",
+                      "param_hints": {"group_name": "Call get_groups to retrieve valid group names."}},
+    "get_template_text": {"method": "GET", "path": "/configuration/v1/groups/{group_name}/templates/{template_name}",
+                           "param_hints": {"group_name": "Call get_groups to retrieve valid group names.", "template_name": "Call get_templates(group_name=<name>) to retrieve template names."}},
+    "delete_template": {"method": "DELETE", "path": "/configuration/v1/groups/{group_name}/templates/{template_name}",
+                         "param_hints": {"group_name": "Call get_groups to retrieve valid group names.", "template_name": "Call get_templates(group_name=<name>) to retrieve template names."}},
 
     # Template Variables
-    "get_template_variables": {"method": "GET", "path": "/configuration/v1/devices/{serial}/template_variables"},
+    "get_template_variables": {"method": "GET", "path": "/configuration/v1/devices/{serial}/template_variables",
+                                "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
     "get_all_template_variables": {"method": "GET", "path": "/configuration/v1/devices/template_variables"},
-    "create_template_variables": {"method": "POST", "path": "/configuration/v1/devices/{serial}/template_variables"},
-    "update_template_variables": {"method": "PATCH", "path": "/configuration/v1/devices/{serial}/template_variables"},
-    "replace_template_variables": {"method": "PUT", "path": "/configuration/v1/devices/{serial}/template_variables"},
-    "delete_template_variables": {"method": "DELETE", "path": "/configuration/v1/devices/{serial}/template_variables"},
+    "create_template_variables": {"method": "POST", "path": "/configuration/v1/devices/{serial}/template_variables",
+                                   "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "update_template_variables": {"method": "PATCH", "path": "/configuration/v1/devices/{serial}/template_variables",
+                                   "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "replace_template_variables": {"method": "PUT", "path": "/configuration/v1/devices/{serial}/template_variables",
+                                    "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "delete_template_variables": {"method": "DELETE", "path": "/configuration/v1/devices/{serial}/template_variables",
+                                   "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
 
     # AP Settings
-    "get_ap_settings": {"method": "GET", "path": "/configuration/v2/ap_settings/{serial}"},
-    "update_ap_settings": {"method": "PATCH", "path": "/configuration/v2/ap_settings/{serial}"},
-    "get_ap_cli_config": {"method": "GET", "path": "/configuration/v1/ap_cli/{group_or_serial}"},
-    "replace_ap_cli_config": {"method": "POST", "path": "/configuration/v1/ap_cli/{group_or_serial}"},
+    "get_ap_settings": {"method": "GET", "path": "/configuration/v2/ap_settings/{serial}",
+                         "param_hints": {"serial": "Call get_aps or get_device_inventory(sku_type='IAP') to retrieve AP serial numbers."}},
+    "update_ap_settings": {"method": "PATCH", "path": "/configuration/v2/ap_settings/{serial}",
+                             "param_hints": {"serial": "Call get_aps or get_device_inventory(sku_type='IAP') to retrieve AP serial numbers."}},
+    "get_ap_cli_config": {"method": "GET", "path": "/configuration/v1/ap_cli/{group_or_serial}",
+                           "param_hints": {"group_or_serial": "Pass a group name (from get_groups) or an AP serial number (from get_aps)."}},
+    "replace_ap_cli_config": {"method": "POST", "path": "/configuration/v1/ap_cli/{group_or_serial}",
+                               "param_hints": {"group_or_serial": "Pass a group name (from get_groups) or an AP serial number (from get_aps)."}},
 
-    # WLANs
-    "get_wlan": {"method": "GET", "path": "/configuration/v2/wlan/{group_name}/{wlan_name}"},
-    "get_all_wlans": {"method": "GET", "path": "/configuration/v2/wlan/{group_name}"},
-    "create_wlan": {"method": "POST", "path": "/configuration/v2/wlan/{group_name}"},
-    "update_wlan": {"method": "PATCH", "path": "/configuration/v2/wlan/{group_name}/{wlan_name}"},
-    "delete_wlan": {"method": "DELETE", "path": "/configuration/v2/wlan/{group_name}/{wlan_name}"},
+    # WLANs — GET uses /configuration/full_wlan, GET_ALL uses v1, CREATE/UPDATE use v2, DELETE uses v1
+    "get_wlan": {"method": "GET", "path": "/configuration/full_wlan/{group_name}/{wlan_name}",
+                  "param_hints": {"group_name": "Call get_groups to retrieve valid group names.", "wlan_name": "Call get_all_wlans(group_name=<name>) to retrieve WLAN names."}},
+    "get_all_wlans": {"method": "GET", "path": "/configuration/v1/wlan/{group_name}",
+                       "param_hints": {"group_name": "Call get_groups to retrieve valid group names. A 404 response means the group has no WLANs (switch-only group) — skip it and try the next group."}},
+    "create_wlan": {"method": "POST", "path": "/configuration/v2/wlan/{group_name}",
+                     "param_hints": {"group_name": "Call get_groups to retrieve valid group names."}},
+    "update_wlan": {"method": "PATCH", "path": "/configuration/v2/wlan/{group_name}/{wlan_name}",
+                     "param_hints": {"group_name": "Call get_groups to retrieve valid group names.", "wlan_name": "Call get_all_wlans(group_name=<name>) to retrieve WLAN names."}},
+    "delete_wlan": {"method": "DELETE", "path": "/configuration/v1/wlan/{group_name}/{wlan_name}",
+                     "param_hints": {"group_name": "Call get_groups to retrieve valid group names.", "wlan_name": "Call get_all_wlans(group_name=<name>) to retrieve WLAN names."}},
 
     # Device Inventory / Monitoring
     "get_device_inventory": {"method": "GET", "path": "/monitoring/v2/aps", "params": {"offset": 0, "limit": 50}},
@@ -114,10 +146,14 @@ API_ENDPOINTS = {
     # Sites
     "get_sites": {"method": "GET", "path": "/central/v2/sites", "params": {"offset": 0, "limit": 20}},
     "create_site": {"method": "POST", "path": "/central/v2/sites"},
-    "update_site": {"method": "PATCH", "path": "/central/v2/sites/{site_id}"},
-    "delete_site": {"method": "DELETE", "path": "/central/v2/sites/{site_id}"},
-    "associate_devices_to_site": {"method": "POST", "path": "/central/v2/sites/{site_id}/associate"},
-    "unassociate_devices_from_site": {"method": "POST", "path": "/central/v2/sites/{site_id}/unassociate"},
+    "update_site": {"method": "PATCH", "path": "/central/v2/sites/{site_id}",
+                     "param_hints": {"site_id": "Call get_sites to retrieve valid site IDs."}},
+    "delete_site": {"method": "DELETE", "path": "/central/v2/sites/{site_id}",
+                     "param_hints": {"site_id": "Call get_sites to retrieve valid site IDs."}},
+    "associate_devices_to_site": {"method": "POST", "path": "/central/v2/sites/{site_id}/associate",
+                                   "param_hints": {"site_id": "Call get_sites to retrieve valid site IDs."}},
+    "unassociate_devices_from_site": {"method": "POST", "path": "/central/v2/sites/{site_id}/unassociate",
+                                       "param_hints": {"site_id": "Call get_sites to retrieve valid site IDs."}},
 
     # Topology
     "get_topology_site": {"method": "GET", "path": "/topology_external_api/v1/sites"},
@@ -136,10 +172,11 @@ API_ENDPOINTS = {
     "get_wids_client_attacks": {"method": "GET", "path": "/rapids/v1/wids/client_attacks"},
     "get_wids_events": {"method": "GET", "path": "/rapids/v1/wids/events"},
 
-    # Audit Logs
-    "get_audit_trail_logs": {"method": "GET", "path": "/auditlogs/v2/logs", "params": {"offset": 0, "limit": 20}},
-    "get_event_logs": {"method": "GET", "path": "/auditlogs/v2/events", "params": {"offset": 0, "limit": 20}},
-    "get_event_details": {"method": "GET", "path": "/auditlogs/v2/event_details/{event_id}"},
+    # Audit Logs — paths verified against pycentral SDK
+    "get_audit_trail_logs": {"method": "GET", "path": "/platform/auditlogs/v1/logs", "params": {"offset": 0, "limit": 20}},
+    "get_event_logs": {"method": "GET", "path": "/auditlogs/v1/events", "params": {"offset": 0, "limit": 20}},
+    "get_event_details": {"method": "GET", "path": "/auditlogs/v1/event_details/{event_id}",
+                           "param_hints": {"event_id": "Call get_event_logs to retrieve valid event IDs."}},
 
     # VisualRF
     "get_visualrf_campus_list": {"method": "GET", "path": "/visualrf_api/v1/campus"},
@@ -153,10 +190,13 @@ API_ENDPOINTS = {
 
     # User Management
     "list_users": {"method": "GET", "path": "/platform/rbac/v1/users"},
-    "get_user": {"method": "GET", "path": "/platform/rbac/v1/users/{username}"},
+    "get_user": {"method": "GET", "path": "/platform/rbac/v1/users/{username}",
+                  "param_hints": {"username": "Call list_users to retrieve valid usernames."}},
     "create_user": {"method": "POST", "path": "/platform/rbac/v1/users"},
-    "update_user": {"method": "PATCH", "path": "/platform/rbac/v1/users/{username}"},
-    "delete_user": {"method": "DELETE", "path": "/platform/rbac/v1/users/{username}"},
+    "update_user": {"method": "PATCH", "path": "/platform/rbac/v1/users/{username}",
+                     "param_hints": {"username": "Call list_users to retrieve valid usernames."}},
+    "delete_user": {"method": "DELETE", "path": "/platform/rbac/v1/users/{username}",
+                     "param_hints": {"username": "Call list_users to retrieve valid usernames."}},
     "get_roles": {"method": "GET", "path": "/platform/rbac/v1/roles"},
 
     # MSP
@@ -173,30 +213,42 @@ API_ENDPOINTS = {
     "get_clients": {"method": "GET", "path": "/monitoring/v1/clients/wireless", "params": {"offset": 0, "limit": 50}},
     "get_wired_clients": {"method": "GET", "path": "/monitoring/v1/clients/wired", "params": {"offset": 0, "limit": 50}},
 
-    # NEW Phase 1 endpoints (added in Phase 1 update)
+    # Phase 1 extended endpoints
     "get_wireless_clients": {"method": "GET", "path": "/monitoring/v1/clients/wireless", "params": {"offset": 0, "limit": 50}},
-    "get_client_details": {"method": "GET", "path": "/monitoring/v1/clients/{macaddr}"},
+    "get_client_details": {"method": "GET", "path": "/monitoring/v1/clients/{macaddr}",
+                            "param_hints": {"macaddr": "Pass the MAC address directly, e.g. macaddr='3C:0A:F3:9B:7E:51'."}},
     "get_client_count": {"method": "GET", "path": "/monitoring/v2/clients/count"},
     "get_alerts": {"method": "GET", "path": "/central/v1/notifications", "params": {"offset": 0, "limit": 20}},
     "get_alert_config": {"method": "GET", "path": "/central/v1/notifications/settings"},
-    "acknowledge_alert": {"method": "POST", "path": "/central/v1/notifications/{alert_id}"},
-    "get_ap_details": {"method": "GET", "path": "/monitoring/v1/aps/{serial}"},
-    "get_switch_details": {"method": "GET", "path": "/monitoring/v1/switches/{serial}"},
-    "get_gateway_details": {"method": "GET", "path": "/monitoring/v1/gateways/{serial}"},
+    "acknowledge_alert": {"method": "POST", "path": "/central/v1/notifications/{alert_id}",
+                           "param_hints": {"alert_id": "Call get_alerts to retrieve valid alert IDs."}},
+    "get_ap_details": {"method": "GET", "path": "/monitoring/v1/aps/{serial}",
+                        "param_hints": {"serial": "Call get_aps or get_device_inventory(sku_type='IAP') to retrieve AP serial numbers."}},
+    "get_switch_details": {"method": "GET", "path": "/monitoring/v1/switches/{serial}",
+                            "param_hints": {"serial": "Call get_switches to retrieve switch serial numbers."}},
+    "get_gateway_details": {"method": "GET", "path": "/monitoring/v1/gateways/{serial}",
+                             "param_hints": {"serial": "Call get_gateways to retrieve gateway serial numbers."}},
     "get_ap_rf_summary": {"method": "GET", "path": "/monitoring/v1/aps/rf_summary"},
-    "get_switch_ports": {"method": "GET", "path": "/monitoring/v1/switches/{serial}/ports"},
-    "get_switch_port_details": {"method": "GET", "path": "/monitoring/v1/switches/{serial}/ports/{port}"},
-    "get_device_tunnels": {"method": "GET", "path": "/monitoring/v1/devices/{serial}/tunnels"},
-    "get_ap_neighbors": {"method": "GET", "path": "/monitoring/v1/aps/{serial}/neighbors"},
+    "get_switch_ports": {"method": "GET", "path": "/monitoring/v1/switches/{serial}/ports",
+                          "param_hints": {"serial": "Call get_switches to retrieve switch serial numbers."}},
+    "get_switch_port_details": {"method": "GET", "path": "/monitoring/v1/switches/{serial}/ports/{port}",
+                                 "param_hints": {"serial": "Call get_switches to retrieve switch serial numbers."}},
+    "get_device_tunnels": {"method": "GET", "path": "/monitoring/v1/devices/{serial}/tunnels",
+                            "param_hints": {"serial": "Call get_device_inventory, get_aps, or get_switches to retrieve device serial numbers."}},
+    "get_ap_neighbors": {"method": "GET", "path": "/monitoring/v1/aps/{serial}/neighbors",
+                          "param_hints": {"serial": "Call get_aps or get_device_inventory(sku_type='IAP') to retrieve AP serial numbers."}},
     "get_networks": {"method": "GET", "path": "/monitoring/v2/networks", "params": {"offset": 0, "limit": 50}},
     "get_wan_uplinks": {"method": "GET", "path": "/monitoring/v1/wan/uplinks"},
-    "get_wan_uplink_bandwidth": {"method": "GET", "path": "/monitoring/v1/wan/uplinks/bandwidth/{serial}"},
+    "get_wan_uplink_bandwidth": {"method": "GET", "path": "/monitoring/v1/wan/uplinks/bandwidth/{serial}",
+                                  "param_hints": {"serial": "Call get_device_inventory or get_gateways to retrieve device serial numbers."}},
     "get_wan_tunnels": {"method": "GET", "path": "/monitoring/v1/wan/tunnels"},
     "get_presence_analytics": {"method": "GET", "path": "/presence/v1/analytics/sites"},
     "get_presence_trend": {"method": "GET", "path": "/presence/v1/analytics/trend"},
     "get_guest_portals": {"method": "GET", "path": "/guest/v1/portals"},
-    "get_guest_visitors": {"method": "GET", "path": "/guest/v1/portals/{portal_id}/visitors"},
-    "create_guest_visitor": {"method": "POST", "path": "/guest/v1/portals/{portal_id}/visitors"},
+    "get_guest_visitors": {"method": "GET", "path": "/guest/v1/portals/{portal_id}/visitors",
+                            "param_hints": {"portal_id": "Call get_guest_portals to retrieve valid portal IDs."}},
+    "create_guest_visitor": {"method": "POST", "path": "/guest/v1/portals/{portal_id}/visitors",
+                              "param_hints": {"portal_id": "Call get_guest_portals to retrieve valid portal IDs."}},
 }
 
 
@@ -361,7 +413,13 @@ class MCPToolManager:
             try:
                 path = path_template.format(**path_params)
             except KeyError as e:
-                return json.dumps({"error": True, "detail": f"Missing required path parameter: {e}"})
+                missing = str(e).strip("'")
+                param_hints = endpoint.get("param_hints", {})
+                hint = param_hints.get(missing, "")
+                detail = f"Missing required path parameter: '{missing}'."
+                if hint:
+                    detail += f" {hint}"
+                return json.dumps({"error": True, "detail": detail})
 
             url = f"{manager.base_url}{path}"
             headers = {"Authorization": f"Bearer {manager.token}", "Content-Type": "application/json"}
@@ -707,9 +765,18 @@ MULTI-STEP EXAMPLES:
 - "WLAN/wireless config" → first call get_groups, then call get_all_wlans for each group in sequence
 - "site, group, WLAN config" → call get_sites AND get_groups in parallel; then call get_all_wlans for each group one by one
 - "network summary" → call get_device_inventory, get_sites, get_client_count, get_alerts in parallel; then get WLANs per group
+- "device config" → first call get_device_inventory or get_aps/get_switches to obtain serial numbers, then call get_device_configuration(serial=<serial>)
+- "AP settings" → first call get_aps to get serial numbers, then call get_ap_settings(serial=<serial>)
 - "OSPF on 10.1.1.1" → call get_ospf_neighbors(device_ip="10.1.1.1")
 - "security audit on 10.1.1.5" → call audit_security_posture(device_ip="10.1.1.5")
 - "compare configs on switch" → call compare_configs(device_ip="x.x.x.x")
+
+TOOLS THAT REQUIRE PRIOR LOOKUP:
+- get_device_configuration, get_device_config_details, get_ap_settings: need serial → call get_aps/get_switches first
+- get_all_wlans: needs group_name → call get_groups first
+- get_wlan: needs group_name AND wlan_name → call get_groups, then get_all_wlans
+- get_switch_ports, get_switch_details: need serial → call get_switches first
+- get_ap_details, get_ap_neighbors: need serial → call get_aps first
 """)
 
         messages = [system_prompt] + list(state["messages"])
@@ -774,7 +841,7 @@ MULTI-STEP EXAMPLES:
                     except Exception:
                         failure_counts[failure_key] = 0  # Reset on non-JSON success
 
-                    if failure_counts.get(failure_key, 0) >= 3:
+                    if failure_counts.get(failure_key, 0) >= MAX_TOOL_FAILURES:
                         result_str = json.dumps({
                             "error": True,
                             "detail": f"Tool '{name}' has failed {failure_counts[failure_key]} times with the same arguments. "

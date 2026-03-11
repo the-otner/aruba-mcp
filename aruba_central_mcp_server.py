@@ -783,7 +783,7 @@ async def get_wlan(
     Returns:
         JSON string containing WLAN details
     """
-    result = await _get(f"/configuration/v2/wlan/{group_name}/{wlan_name}")
+    result = await _get(f"/configuration/full_wlan/{group_name}/{wlan_name}")
     return json.dumps(result)
 
 
@@ -793,12 +793,12 @@ async def get_all_wlans(group_name: str) -> str:
     Get all WLANs in a group.
     
     Args:
-        group_name: Configuration group name
+        group_name: Configuration group name (call get_groups first to retrieve valid names)
         
     Returns:
         JSON string containing all WLANs
     """
-    result = await _get(f"/configuration/v2/wlan/{group_name}")
+    result = await _get(f"/configuration/v1/wlan/{group_name}")
     return json.dumps(result)
 
 
@@ -867,7 +867,7 @@ async def delete_wlan(
     Returns:
         JSON string containing deletion result
     """
-    result = await _delete(f"/configuration/v2/wlan/{group_name}/{wlan_name}")
+    result = await _delete(f"/configuration/v1/wlan/{group_name}/{wlan_name}")
     return json.dumps(result)
 
 
